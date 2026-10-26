@@ -1,0 +1,200 @@
+import { useState, useEffect, useContext } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { AuthContext } from '../context/AuthContext';
+import api from '../api/axios';
+import Toast, { useToast } from '../components/Toast';
+
+const BookVenue = () => {
+    const { id } = useParams();
+    const navigate = useNavigate();
+    const { user } = useContext(AuthContext);
+    const { toast, showToast, closeToast } = useToast();
+
+    const [venue, setVenue] = useState(null);
+    const [date, setDate] = useState('');
+    const [startTime, setStartTime] = useState('');
+    const [endTime, setEndTime] = useState('');
+    const [purpose, setPurpose] = useState('');
+    const [eventName, setEventName] = useState('');
+    const [participantsCount, setParticipantsCount] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [success, setSuccess] = useState(false);
+    const [canWaitlist, setCanWaitlist] = useState(false);
+
+    useEffect(() => {
+        api.get(`/venues`).then(r => {
+            const v = r.data.find(v => v._id === id);
+            setVenue(v || null);
+        });
+    }, [id]);
+
+    const handleSubmit = async (e, isWaitlist = false) => {
+        if (e) e.preventDefault();
+        if (startTime >= endTime) {
+            return showToast('End time must be after start time.', 'error');
+        }
+        setLoading(true);
+        try {
+            await api.post('/bookings', {
+                venue_id: id,
+                date,
+                start_time: startTime,
+                end_time: endTime,
+                purpose,
+                event_name: eventName,
+                participants_count: participantsCount,
+                isWaitlist
+            });
+            setSuccess(true);
+            showToast(isWaitlist ? 'Added to waitlist! ✓' : 'Booking request submitted! ✓', 'success');
+            setTimeout(() => navigate('/dashboard'), 1800);
+        } catch (err) {
+            if (err.response?.status === 409 && err.response?.data?.canWaitlist) {
+                setCanWaitlist(true);
+                showToast(err.response.data.message, 'info');
+            } else {
+                showToast(err.response?.data?.message || 'Booking failed. Please try again.', 'error');
+            }
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    if (!venue) return (
+        <div className="bg-app flex h-screen items-center justify-center">
+            <div className="w-10 h-10 rounded-full border-4 border-red-500 border-t-transparent animate-spin" />
+        </div>
+    );
+
+    return (
+        <div className="bg-app min-h-screen">
+            <Toast toast={toast} onClose={closeToast} />
+
+            {/* Navbar */}
+            <nav className="navbar px-6 py-4 flex items-center gap-3">
+                <button onClick={() => navigate('/dashboard')} className="text-gray-400 hover:text-red-400 transition-colors">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                    </svg>
+                </button>
+                <span className="text-xl font-black gradient-text">Request Booking</span>
+            </nav>
+
+            <main className="max-w-xl mx-auto px-4 py-10">
+
+                {/* Venue Hero */}
+                <div className="rounded-2xl mb-6 overflow-hidden animate-fade-in-up">
+                    {venue.imageUrl ? (
+                        <img src={venue.imageUrl} alt={venue.name} className="w-full h-40 object-cover" />
+                    ) : (
+                        <div className="w-full h-40 flex items-center justify-center text-6xl"
+                            style={{
+                                background: venue.type === 'classroom'
+                                    ? 'linear-gradient(135deg, rgba(26,110,245,0.4), #0d0d0d)'
+                                    : 'linear-gradient(135deg, rgba(224,32,32,0.4), #0d0d0d)'
+                            }}>
+                            {venue.type === 'classroom' ? '📚' : '🎤'}
+                        </div>
+                    )}
+                </div>
+
+                {/* Venue info */}
+                <div className="glass-card p-5 mb-6 animate-fade-in-up" style={{ animationDelay: '0.1s' }}>
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h1 className="text-xl font-black text-theme">{venue.name}</h1>
+                            <p className="text-gray-400 text-sm mt-1">👥 Capacity: {venue.capacity}</p>
+                        </div>
+                        <span className={`text-xs px-3 py-1 rounded-full font-semibold ${venue.type === 'classroom' ? 'badge-classroom' : 'badge-seminar'}`}>
+                            {venue.type === 'classroom' ? 'Classroom' : 'Seminar Hall'}
+                        </span>
+                    </div>
+
+                    {venue.weekly_schedule && venue.weekly_schedule.length > 0 && (
+                        <div className="mt-4 pt-4 border-t border-white/10">
+                            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">🔒 Permanently Locked For Regular Classes</h3>
+                            <div className="flex flex-wrap gap-2">
+                                {venue.weekly_schedule.map((block, i) => (
+                                    <span key={i} className="text-xs bg-red-500/10 text-red-300 border border-red-500/20 px-2 py-1 flex items-center gap-1 group relative cursor-help" style={{ borderRadius: '4px' }}>
+                                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                                        <span className="font-bold">{['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][block.day]}</span>
+                                        <span className="opacity-80 ml-1">{block.start_time} - {block.end_time}</span>
+                                        
+                                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 w-max px-2 py-1 bg-black/90 text-white text-[10px] rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none border border-white/10">
+                                            {block.label}
+                                        </div>
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* Booking Form */}
+                <div className="glass-card p-6 animate-fade-in-up" style={{ animationDelay: '0.2s' }}>
+                    <h2 className="text-lg font-bold text-theme mb-5">📝 Booking Details</h2>
+                    <form onSubmit={handleSubmit} className="space-y-4">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-300 mb-1.5">Date</label>
+                            <input type="date" value={date} onChange={e => setDate(e.target.value)}
+                                min={new Date().toISOString().split('T')[0]}
+                                className="input-dark" required />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-300 mb-1.5">Start Time</label>
+                                <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)}
+                                    className="input-dark" required />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-300 mb-1.5">End Time</label>
+                                <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)}
+                                    className="input-dark" required />
+                            </div>
+                        </div>
+                        <div>
+                            <textarea value={purpose} onChange={e => setPurpose(e.target.value)}
+                                rows={3} className="input-dark resize-none"
+                                placeholder="e.g. CS101 extra class, Department seminar..." required />
+                        </div>
+
+                        {venue.type === 'seminar_hall' && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-fade-in">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-300 mb-1.5">Event Name</label>
+                                    <input type="text" value={eventName} onChange={e => setEventName(e.target.value)}
+                                        className="input-dark" placeholder="e.g. AI Symposium" required />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-300 mb-1.5">Expected Participants</label>
+                                    <input type="number" value={participantsCount} onChange={e => setParticipantsCount(e.target.value)}
+                                        className="input-dark" placeholder="e.g. 150" required />
+                                </div>
+                            </div>
+                        )}
+
+                        {canWaitlist ? (
+                            <div className="flex gap-3 mt-2">
+                                <button type="button" onClick={() => handleSubmit(null, true)} disabled={loading || success}
+                                    className="btn-primary flex-1" style={{ background: 'linear-gradient(135deg, #f59e0b, #d97706)' }}>
+                                    {loading ? '⏳ Processing...' : '⏳ Join Waitlist'}
+                                </button>
+                                <button type="button" onClick={() => setCanWaitlist(false)} disabled={loading || success}
+                                    className="btn-glass flex-1 rounded-lg font-medium text-sm">
+                                    Cancel
+                                </button>
+                            </div>
+                        ) : (
+                            <button type="submit" disabled={loading || success}
+                                className="btn-primary w-full mt-2">
+                                {success ? '✓ Submitted! Redirecting...' : loading ? '⏳ Submitting...' : '🚀 Submit Booking Request'}
+                            </button>
+                        )}
+                    </form>
+                </div>
+            </main>
+        </div>
+    );
+};
+
+export default BookVenue;

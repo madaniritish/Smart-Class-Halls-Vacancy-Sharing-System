@@ -1,0 +1,26 @@
+{
+  "name": "smart-class-halls-vacancy-sharing-system",
+  "version": "1.0.0",
+  "description": "CampusFlow - Smart Class and Halls Vacancy Sharing System",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "server": "npm --prefix server start",
+    "client": "npm --prefix client run dev",
+    "seed": "npm --prefix server run seed"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/madaniritish/Smart-Class-Halls-Vacancy-Sharing-System.git"
+  },
+  "author": "Ritish,Lj",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/madaniritish/Smart-Class-Halls-Vacancy-Sharing-System/issues"
+  },
+  "homepage": "https://github.com/madaniritish/Smart-Class-Halls-Vacancy-Sharing-System#readme",
+  "dependencies": {
+    "express": "^5.2.1",
+    "mongoose": "^9.10.4"
+  }
+}

@@ -1,0 +1,652 @@
+import { useState, useEffect, useContext, useRef } from 'react';
+import { AuthContext } from '../context/AuthContext';
+import { useNavigate } from 'react-router-dom';
+import { useTheme } from '../context/ThemeContext';
+import api from '../api/axios';
+import Toast, { useToast } from '../components/Toast';
+import CalendarView from '../components/CalendarView';
+import AnalyticsChart from '../components/AnalyticsChart';
+import ConfirmationModal from '../components/ConfirmationModal';
+
+/* ── Status badge ── */
+const StatusBadge = ({ status }) => {
+    const map = {
+        pending: 'badge-pending',
+        approved: 'badge-approved',
+        rejected: 'badge-rejected',
+        cancelled: 'badge-rejected',
+        waitlisted: 'badge-waitlist',
+    };
+    return (
+        <span className={`text-xs px-2.5 py-0.5 rounded-full font-semibold ${map[status] || 'badge-pending'}`}>
+            {status?.charAt(0).toUpperCase() + status?.slice(1)}
+        </span>
+    );
+};
+
+/* ── Main Dashboard ── */
+const Dashboard = () => {
+    const { user, logout } = useContext(AuthContext);
+    const navigate = useNavigate();
+    const { isDark, toggle } = useTheme();
+    const { toast, showToast, closeToast } = useToast();
+
+    const [venues, setVenues] = useState([]);
+    const [bookings, setBookings] = useState([]);
+    const [publicBookings, setPublicBookings] = useState([]); // For the calendar
+    const [notifications, setNotifications] = useState([]);
+    const [showNotifications, setShowNotifications] = useState(false);
+    const [busy, setBusy] = useState(true);
+
+    const [viewMode, setViewMode] = useState('list'); // 'list' or 'calendar'
+    const [editingBooking, setEditingBooking] = useState(null);
+    const [confirmCancel, setConfirmCancel] = useState({ isOpen: false, id: null });
+
+    const notifRef = useRef(null);
+
+    // Close notifications on outside click
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (notifRef.current && !notifRef.current.contains(event.target)) {
+                setShowNotifications(false);
+            }
+        };
+        if (showNotifications) {
+            document.addEventListener('mousedown', handleClickOutside);
+        }
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [showNotifications]);
+
+    // Search & filter state
+    const [search, setSearch] = useState('');
+    const [filterType, setFilterType] = useState('all');
+    const [filterBranch, setFilterBranch] = useState('all');
+    const [filterCap, setFilterCap] = useState('');
+
+    // Admin if role is one of the admin variants
+    const isAdmin = ['classroom_admin', 'seminar_admin', 'sysadmin'].includes(user?.role?.toLowerCase());
+    
+    // Users can book rooms. We now allow Admins to also act as users so they can book their own rooms.
+    const isUser = ['faculty', 'cr', 'event_organizer', 'classroom_admin', 'seminar_admin', 'sysadmin'].includes(user?.role?.toLowerCase());
+
+    useEffect(() => {
+        const load = async () => {
+            try {
+                const [v, b, n, pb] = await Promise.all([
+                    api.get('/venues'),
+                    api.get('/bookings'),
+                    api.get('/notifications'),
+                    api.get('/bookings/approved')
+                ]);
+                setVenues(v.data);
+                setBookings(b.data);
+                setNotifications(n.data);
+                setPublicBookings(pb.data);
+            } catch (err) {
+                showToast('Failed to load data', 'error');
+            } finally {
+                setBusy(false);
+            }
+        };
+        if (user) load();
+    }, [user]);
+
+    // Admin approve/reject
+    const handleStatus = async (id, status) => {
+        let rejection_reason = '';
+        if (status === 'rejected') {
+            rejection_reason = window.prompt('Please enter a reason for rejection:');
+            if (rejection_reason === null) return; // Cancelled
+            if (!rejection_reason.trim()) {
+                return showToast('Rejection reason is required', 'error');
+            }
+        }
+        try {
+            await api.put(`/bookings/${id}/status`, { status, rejection_reason });
+            setBookings(prev => prev.map(b => b._id === id ? { ...b, status, rejection_reason } : b));
+            showToast(`Booking ${status}! ✓`, status === 'approved' ? 'success' : 'info');
+        } catch (err) {
+            showToast(err.response?.data?.message || 'Failed to update status', 'error');
+        }
+    };
+
+    // Cancel booking
+    const handleCancel = (id) => {
+        setConfirmCancel({ isOpen: true, id });
+    };
+
+    const handleConfirmCancel = async () => {
+        const { id } = confirmCancel;
+        setConfirmCancel({ isOpen: false, id: null });
+        try {
+            await api.patch(`/bookings/${id}/cancel`);
+            setBookings(prev => prev.map(b => b._id === id ? { ...b, status: 'cancelled' } : b));
+            showToast('Booking cancelled', 'info');
+        } catch (err) {
+            showToast(err.response?.data?.message || 'Cannot cancel', 'error');
+        }
+    };
+
+    const handleEditSubmit = async (e) => {
+        e.preventDefault();
+        try {
+            const res = await api.put(`/bookings/${editingBooking._id}`, editingBooking);
+            // Replace the updated booking in state
+            setBookings(prev => prev.map(b => b._id === editingBooking._id ? res.data : b));
+            setEditingBooking(null);
+            showToast('Booking updated successfully! ✓', 'success');
+        } catch (err) {
+            showToast(err.response?.data?.message || 'Failed to update booking', 'error');
+        }
+    };
+
+    const handleLogout = () => { logout(); navigate('/login'); };
+
+    const markNotificationRead = async (id) => {
+        try {
+            await api.put(`/notifications/${id}/read`);
+            setNotifications(prev => prev.map(n => n._id === id ? { ...n, isRead: true } : n));
+        } catch (err) {
+            console.error('Failed to mark read', err);
+        }
+    };
+
+    const exportCSV = (dataToExport, filename) => {
+        const headers = ['User', 'Venue', 'Date', 'Start Time', 'End Time', 'Status', 'Purpose'];
+        const rows = dataToExport.map(b => [
+            b.user?.username || b.user || 'Unknown',
+            b.venue?.name || b.venue || 'Unknown',
+            new Date(b.date).toLocaleDateString(),
+            b.start_time || b.startTime,
+            b.end_time || b.endTime,
+            b.status,
+            `"${(b.purpose || '').replace(/"/g, '""')}"`
+        ]);
+        const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join("\n");
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", filename);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
+    const unreadCount = notifications.filter(n => !n.isRead).length;
+
+    // Filtered venues
+    const filteredVenues = venues.filter(v => {
+        const matchSearch = v.name.toLowerCase().includes(search.toLowerCase());
+        const matchType = filterType === 'all' || v.type === filterType;
+        const matchBranch = filterBranch === 'all' || v.branch === filterBranch;
+        const matchCap = !filterCap || v.capacity >= Number(filterCap);
+        return matchSearch && matchType && matchBranch && matchCap;
+    });
+
+    // My bookings (for non-admin)
+    const myBookings = bookings.filter(b => b.user?._id === user?.id || b.user === user?.id);
+
+    // Pending for admin
+    const pendingBookings = bookings.filter(b => b.status === 'pending');
+
+    if (busy) return (
+        <div className="bg-app flex h-screen items-center justify-center">
+            <div className="text-center animate-fade-in-up">
+                <div className="w-10 h-10 rounded-full border-4 border-blue-500 border-t-transparent animate-spin mx-auto mb-4" />
+                <p className="text-slate-400 font-medium tracking-wide text-sm uppercase">Loading Dashboard</p>
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="bg-app min-h-screen">
+            <Toast toast={toast} onClose={closeToast} />
+
+            {/* ── Navbar ── */}
+            <nav className="navbar px-6 py-4 flex justify-between items-center">
+                <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center app-logo-bg">
+                        <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                        </svg>
+                    </div>
+                    <span className="text-xl font-black gradient-text">Campus Flow</span>
+                </div>
+
+                <div className="flex items-center gap-3">
+                    <div className="text-right hidden sm:block">
+                        <p className="text-sm font-semibold text-theme">{user?.username}</p>
+                        <p className="text-xs text-theme-muted uppercase tracking-wide">{user?.role?.replace('_', ' ')}</p>
+                    </div>
+
+                    {/* Dark mode */}
+                    <button onClick={toggle} className="p-2 rounded-lg transition-colors btn-glass">
+                        {isDark ? '☀️' : '🌙'}
+                    </button>
+
+                    <button onClick={() => navigate('/profile')} className="p-2 rounded-lg transition-colors hidden sm:block btn-glass"
+                        title="My Profile">
+                        👤
+                    </button>
+
+                    {/* Notifications */}
+                    <div className="relative" ref={notifRef}>
+                        <button onClick={() => setShowNotifications(!showNotifications)} className="p-2 rounded-lg transition-colors relative btn-glass">
+                            🔔
+                            {unreadCount > 0 && (
+                                <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-red-500 rounded-full border border-[var(--dark)]"></span>
+                            )}
+                        </button>
+
+                        {/* Dropdown panel */}
+                        {showNotifications && (
+                            <div className="absolute right-0 mt-3 w-72 sm:w-80 glass-card shadow-2xl z-50 overflow-hidden animate-fade-in-up">
+                                <div className="p-3 border-b border-theme flex justify-between items-center bg-glass">
+                                    <h3 className="font-bold text-theme text-sm">Notifications</h3>
+                                    {unreadCount > 0 && <span className="text-xs text-red-500">{unreadCount} new</span>}
+                                </div>
+                                <div className="max-h-72 overflow-y-auto scrollbar-hide">
+                                    {notifications.length === 0 ? (
+                                        <div className="p-4 text-center text-theme-muted text-sm">No notifications yet.</div>
+                                    ) : (
+                                        notifications.map(n => (
+                                            <div key={n._id} onClick={() => markNotificationRead(n._id)}
+                                                className={`p-3 border-b border-theme cursor-pointer transition-colors ${!n.isRead ? 'bg-red-500/10' : 'hover:bg-black/5 dark:hover:bg-white/5'}`}>
+                                                <div className="flex gap-2 items-start">
+                                                    <span className="text-lg">{n.type === 'success' ? '✅' : n.type === 'error' ? '❌' : 'ℹ️'}</span>
+                                                    <div>
+                                                        <h4 className={`text-sm ${!n.isRead ? 'text-theme font-bold' : 'text-theme-muted'}`}>{n.title}</h4>
+                                                        <p className="text-xs text-theme-muted mt-0.5">{n.message}</p>
+                                                        <p className="text-[10px] text-theme-muted mt-1">{new Date(n.createdAt).toLocaleDateString()}</p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Admin shortcut */}
+                    {isAdmin && (
+                        <button onClick={() => navigate('/admin')}
+                            className="text-sm font-semibold px-3 py-1.5 rounded-lg transition-colors btn-purple-ghost">
+                            ⚙️ {user?.role === 'sysadmin' ? 'Manage System' : 'Manage Branch'}
+                        </button>
+                    )}
+
+                    <button id="logout-btn" onClick={handleLogout}
+                        className="text-sm font-semibold px-3 py-1.5 rounded-lg transition-colors btn-red-ghost">
+                        Logout
+                    </button>
+                </div>
+            </nav>
+
+            <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
+
+                {/* ── Hero Banner ── */}
+                <div className="rounded-2xl p-6 mb-8 animate-fade-in-up hero-gradient shadow-xl border border-white/5">
+                    <h1 className="text-2xl font-bold text-white tracking-tight">
+                        Welcome, {user?.username}.
+                    </h1>
+                    <p className="text-slate-300 mt-1.5 text-sm font-medium">
+                        {isUser ? 'Overview of your venue requests and system status.' : 'Management overview of venue requests and system status.'}
+                    </p>
+                </div>
+
+                {/* ── ADMIN VIEW ── */}
+                {isAdmin && (
+                    <>
+                        {/* Summary cards */}
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-8">
+                            {[
+                                { label: 'Total Bookings', value: bookings.length, color: '#60a5fa' },
+                                { label: 'Pending', value: pendingBookings.length, color: '#fbbf24' },
+                                { label: 'Approved', value: bookings.filter(b => b.status === 'approved').length, color: '#4ade80' },
+                            ].map(c => (
+                                <div key={c.label} className="glass-card p-5">
+                                    <p className="text-xs text-gray-400 uppercase font-medium mb-1">{c.label}</p>
+                                    <p className="text-3xl font-black" style={{ color: c.color }}>{c.value}</p>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* Analytics Charts */}
+                        <AnalyticsChart bookings={bookings} />
+
+                        {/* Pending approvals */}
+                        <div className="glass-card p-6 mb-8">
+                            <h2 className="text-lg font-bold text-white mb-4">⏳ Pending Approvals</h2>
+                            {pendingBookings.length === 0 ? (
+                                <p className="text-gray-500 text-sm text-center py-4">No pending approvals. ✅</p>
+                            ) : (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm table-dark">
+                                        <thead>
+                                            <tr>
+                                                <th className="text-left pb-3 text-gray-500 font-medium">User</th>
+                                                <th className="text-left pb-3 text-gray-500 font-medium">Venue</th>
+                                                <th className="text-left pb-3 text-gray-500 font-medium">Date</th>
+                                                <th className="text-left pb-3 text-gray-500 font-medium">Purpose</th>
+                                                <th className="text-left pb-3 text-gray-500 font-medium">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
+                                            {pendingBookings.map(b => (
+                                                <tr key={b._id}>
+                                                    <td className="py-3 text-white font-medium">{(b.user?.username || b.user_id?.username) || (b.user || b.user_id || 'Unknown')}</td>
+                                                    <td className="py-3 text-gray-300">{b.venue_id?.name || b.venue_id || b.venue?.name || b.venue}</td>
+                                                    <td className="py-3 text-gray-300">{new Date(b.date).toLocaleDateString()}</td>
+                                                    <td className="py-3 text-gray-400">
+                                                        <div className="font-medium text-white">{b.purpose?.slice(0, 30)}</div>
+                                                        {b.event_name && (
+                                                            <div className="text-[10px] text-red-500 font-bold mt-1 uppercase tracking-wider">
+                                                                {b.event_name} • {b.participants_count} folks
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td className="py-3">
+                                                        <div className="flex gap-2">
+                                                            <button onClick={() => handleStatus(b._id, 'approved')}
+                                                                className="text-xs px-3 py-1 rounded-lg font-semibold"
+                                                                style={{ background: 'rgba(34,197,94,0.2)', color: '#4ade80', border: '1px solid rgba(34,197,94,0.3)' }}>
+                                                                ✓ Approve
+                                                            </button>
+                                                            <button onClick={() => handleStatus(b._id, 'rejected')}
+                                                                className="text-xs px-3 py-1 rounded-lg font-semibold"
+                                                                style={{ background: 'rgba(239,68,68,0.2)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)' }}>
+                                                                ✗ Reject
+                                                            </button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* All bookings history */}
+                        <div className="glass-card p-6">
+                            <div className="flex justify-between items-center mb-4">
+                                <h2 className="text-lg font-bold text-white">📋 All Booking History</h2>
+                                <button onClick={() => exportCSV(bookings, 'all_bookings.csv')}
+                                    className="btn-glass text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1">
+                                    📥 Export CSV
+                                </button>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm table-dark">
+                                    <thead>
+                                        <tr>
+                                            <th className="text-left pb-3 text-gray-500 font-medium">User</th>
+                                            <th className="text-left pb-3 text-gray-500 font-medium">Venue</th>
+                                            <th className="text-left pb-3 text-gray-500 font-medium">Date</th>
+                                            <th className="text-left pb-3 text-gray-500 font-medium">Purpose</th>
+                                            <th className="text-left pb-3 text-gray-500 font-medium">Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
+                                        {bookings.map(b => (
+                                            <tr key={b._id}>
+                                                <td className="py-3 text-white font-medium">{(b.user?.username || b.user_id?.username) || (b.user || b.user_id || 'Unknown')}</td>
+                                                <td className="py-3 text-gray-300">{b.venue?.name || b.venue}</td>
+                                                <td className="py-3 text-gray-300">{new Date(b.date).toLocaleDateString()}</td>
+                                                <td className="py-3 text-gray-400">
+                                                    {b.purpose?.slice(0, 30)}
+                                                    {b.status === 'rejected' && b.rejection_reason && (
+                                                        <div className="text-[10px] text-red-400 mt-1 italic">
+                                                            Reason: {b.rejection_reason}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td className="py-3"><StatusBadge status={b.status} /></td>
+                                            </tr>
+                                        ))}
+                                        {bookings.length === 0 && (
+                                            <tr><td colSpan={5} className="py-6 text-center text-gray-500">No bookings found.</td></tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </>
+                )}
+
+                {/* ── FACULTY/USER VIEW ── */}
+                {isUser && (
+                    <div className={isAdmin ? 'mt-12 pt-8 border-t border-theme' : ''}>
+                        {isAdmin && <h2 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
+                             <span className="w-2 h-8 bg-blue-500 rounded-full"></span>
+                             Personal Booking Workspace
+                        </h2>}
+                        {/* View Tabs */}
+                        <div className="flex gap-4 mb-6 border-b border-gray-800 pb-2">
+                            <button onClick={() => setViewMode('list')}
+                                className={`text-sm font-bold pb-2 border-b-2 transition-colors ${viewMode === 'list' ? 'border-red-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`}>
+                                Venues & Requests
+                            </button>
+                            <button onClick={() => setViewMode('calendar')}
+                                className={`text-sm font-bold pb-2 border-b-2 transition-colors ${viewMode === 'calendar' ? 'border-red-500 text-white' : 'border-transparent text-gray-500 hover:text-gray-300'}`}>
+                                Availability Calendar
+                            </button>
+                        </div>
+
+                        {viewMode === 'calendar' ? (
+                            <CalendarView bookings={publicBookings} venues={venues} />
+                        ) : (
+                            <>
+                                {/* Search & Filter Bar */}
+                                <div className="glass-card p-4 mb-6 flex flex-wrap gap-3 items-center animate-fade-in-up">
+                                    <input value={search} onChange={e => setSearch(e.target.value)}
+                                        placeholder="🔍 Search venues..."
+                                        className="input-dark flex-1 min-w-40" style={{ padding: '0.5rem 1rem' }} />
+                                    <select value={filterType} onChange={e => setFilterType(e.target.value)}
+                                        className="input-dark w-40" style={{ padding: '0.5rem 1rem' }}>
+                                        <option value="all">All Types</option>
+                                        <option value="classroom">Classrooms</option>
+                                        <option value="seminar_hall">Seminar Halls</option>
+                                    </select>
+                                    <select value={filterBranch} onChange={e => setFilterBranch(e.target.value)}
+                                        className="input-dark w-32" style={{ padding: '0.5rem 1rem' }}>
+                                        <option value="all">All Branches</option>
+                                        <option value="General">General</option>
+                                        <option value="CSE">CSE</option>
+                                        <option value="ECE">ECE</option>
+                                        <option value="AIDS">AIDS</option>
+                                    </select>
+                                    <input type="number" value={filterCap} onChange={e => setFilterCap(e.target.value)}
+                                        placeholder="Min capacity"
+                                        className="input-dark w-36" style={{ padding: '0.5rem 1rem' }} />
+                                    {(search || filterType !== 'all' || filterBranch !== 'all' || filterCap) && (
+                                        <button onClick={() => { setSearch(''); setFilterType('all'); setFilterBranch('all'); setFilterCap(''); }}
+                                            className="text-sm px-3 py-2 rounded-lg"
+                                            style={{ background: 'rgba(224,32,32,0.2)', color: '#f87171' }}>
+                                            Clear ✕
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Available Venues Grid */}
+                                <h2 className="text-xl font-bold text-white mb-4">🏫 Available Venues
+                                    <span className="text-sm font-normal text-gray-400 ml-2">({filteredVenues.length} found)</span>
+                                </h2>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 mb-10">
+                                    {filteredVenues.map((v, i) => (
+                                        <div key={v._id} className="venue-card animate-fade-in-up"
+                                            style={{ animationDelay: `${i * 0.07}s` }}>
+                                            {/* Venue image or gradient placeholder */}
+                                            {v.imageUrl ? (
+                                                <img src={v.imageUrl} alt={v.name}
+                                                    className="w-full h-32 object-cover rounded-xl mb-3" />
+                                            ) : (
+                                                <div className="w-full h-32 rounded-xl mb-3 flex items-center justify-center text-4xl"
+                                                    style={{
+                                                        background: v.type === 'classroom'
+                                                            ? 'linear-gradient(135deg, rgba(37,99,235,0.2), rgba(15,23,42,0.8))'
+                                                            : 'linear-gradient(135deg, rgba(79,70,229,0.2), rgba(15,23,42,0.8))'
+                                                    }}>
+                                                    {v.type === 'classroom' ? '📚' : '🎤'}
+                                                </div>
+                                            )}
+
+                                            <div className="flex items-start justify-between mb-2">
+                                                <h3 className="font-bold text-white">{v.name}</h3>
+                                                <div className="flex flex-col items-end gap-1">
+                                                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${v.type === 'classroom' ? 'badge-classroom' : 'badge-seminar'}`}>
+                                                        {v.type === 'classroom' ? 'Classroom' : 'Seminar'}
+                                                    </span>
+                                                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-1">
+                                                        {v.branch || 'General'}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <p className="text-gray-400 text-sm mb-3">👥 Capacity: {v.capacity}</p>
+                                            <button onClick={() => navigate(`/book/${v._id}`)}
+                                                className="btn-primary w-full text-center text-sm">
+                                                Request Booking →
+                                            </button>
+                                        </div>
+                                    ))}
+                                    {filteredVenues.length === 0 && (
+                                        <div className="col-span-3 text-center py-10 text-gray-500">
+                                            No venues match your search.
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* My Booking Requests */}
+                                <div className="glass-card p-6">
+                                    <div className="flex justify-between items-center mb-4">
+                                        <h2 className="text-lg font-bold text-white">📋 My Booking Requests</h2>
+                                        <button onClick={() => exportCSV(myBookings, 'my_bookings.csv')}
+                                            className="btn-glass text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1">
+                                            📥 Export CSV
+                                        </button>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm table-dark">
+                                            <thead>
+                                                <tr>
+                                                    <th className="text-left pb-3 text-gray-500 font-medium">Venue</th>
+                                                    <th className="text-left pb-3 text-gray-500 font-medium">Date &amp; Time</th>
+                                                    <th className="text-left pb-3 text-gray-500 font-medium">Purpose</th>
+                                                    <th className="text-left pb-3 text-gray-500 font-medium">Status</th>
+                                                    <th className="text-left pb-3 text-gray-500 font-medium">Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
+                                                {myBookings.map(b => (
+                                                    <tr key={b._id}>
+                                                        <td className="py-3 text-white font-medium">{b.venue?.name || b.venue}</td>
+                                                        <td className="py-3 text-gray-300 text-xs">
+                                                            {new Date(b.date).toLocaleDateString()}<br />
+                                                            <span className="text-gray-500">{b.start_time || b.startTime} – {b.end_time || b.endTime}</span>
+                                                        </td>
+                                                        <td className="py-3 text-gray-400">{b.purpose?.slice(0, 30)}</td>
+                                                        <td className="py-3"><StatusBadge status={b.status} /></td>
+                                                        <td className="py-3">
+                                                            {b.status === 'pending' && (
+                                                                <div className="flex gap-2">
+                                                                    <button onClick={() => setEditingBooking(b)}
+                                                                        className="text-xs px-2 py-1 rounded-lg font-medium"
+                                                                        style={{ background: 'rgba(59,130,246,0.15)', color: '#60a5fa' }}>
+                                                                        Edit
+                                                                    </button>
+                                                                    <button onClick={() => handleCancel(b._id)}
+                                                                        className="text-xs px-2 py-1 rounded-lg font-medium"
+                                                                        style={{ background: 'rgba(224,32,32,0.15)', color: '#f87171' }}>
+                                                                        Cancel
+                                                                    </button>
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                                {myBookings.length === 0 && (
+                                                    <tr><td colSpan={5} className="py-6 text-center text-gray-500">No requests yet.</td></tr>
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </>
+                        )}
+                    </div>
+                )}
+            </main>
+
+            {/* Edit Booking Modal */}
+            {editingBooking && (
+                <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+                    <div className="glass-card p-6 w-full max-w-md animate-fade-in-up">
+                        <h2 className="text-xl font-bold text-white mb-4">✏️ Edit Booking</h2>
+                        <form onSubmit={handleEditSubmit} className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-300 mb-1">Date</label>
+                                <input type="date" value={editingBooking.date ? new Date(editingBooking.date).toISOString().split('T')[0] : ''}
+                                    onChange={e => setEditingBooking({ ...editingBooking, date: e.target.value })}
+                                    className="input-dark" required />
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-300 mb-1">Start Time</label>
+                                    <input type="time" value={editingBooking.start_time || editingBooking.startTime || ''}
+                                        onChange={e => setEditingBooking({ ...editingBooking, start_time: e.target.value })}
+                                        className="input-dark" required />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-300 mb-1">End Time</label>
+                                    <input type="time" value={editingBooking.end_time || editingBooking.endTime || ''}
+                                        onChange={e => setEditingBooking({ ...editingBooking, end_time: e.target.value })}
+                                        className="input-dark" required />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-300 mb-1">Purpose</label>
+                                <textarea value={editingBooking.purpose || ''}
+                                    onChange={e => setEditingBooking({ ...editingBooking, purpose: e.target.value })}
+                                    rows={2} className="input-dark resize-none" required />
+                            </div>
+                            {editingBooking.venue_id?.type === 'seminar_hall' || editingBooking.venue?.type === 'seminar_hall' ? (
+                                <div className="grid grid-cols-2 gap-4 mt-2">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-300 mb-1">Event Name</label>
+                                        <input type="text" value={editingBooking.event_name || ''}
+                                            onChange={e => setEditingBooking({ ...editingBooking, event_name: e.target.value })}
+                                            className="input-dark" required />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-300 mb-1">Participants</label>
+                                        <input type="number" value={editingBooking.participants_count || ''}
+                                            onChange={e => setEditingBooking({ ...editingBooking, participants_count: e.target.value })}
+                                            className="input-dark" required />
+                                    </div>
+                                </div>
+                            ) : null}
+                            <div className="flex gap-3 mt-6">
+                                <button type="submit" className="btn-primary flex-1">Save Changes</button>
+                                <button type="button" onClick={() => setEditingBooking(null)} className="btn-glass flex-1 font-medium text-sm rounded-lg">Cancel</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            <ConfirmationModal 
+                isOpen={confirmCancel.isOpen}
+                title="Cancel Booking?"
+                message="Are you sure you want to cancel this booking request? This will release the venue for others."
+                onConfirm={handleConfirmCancel}
+                onCancel={() => setConfirmCancel({ isOpen: false, id: null })}
+                confirmText="Yes, Cancel"
+                type="warning"
+            />
+        </div>
+    );
+};
+
+export default Dashboard;
